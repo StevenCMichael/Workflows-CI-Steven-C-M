@@ -1,0 +1,74 @@
+name: CI Steven C Michael
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      CSV_URL: "MLProject/cleaned_banana_quality.csv"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Miniconda
+      uses: conda-incubator/setup-miniconda@v3
+      with:
+        auto-update-conda: true
+        activate-environment: mlflow-env
+        environment-file: MLProject/conda.yaml
+        python-version: 3.12
+        auto-activate-base: false
+
+    - name: Prepare mlruns & init default experiment
+      shell: bash -l {0}
+      run: |
+        export MLFLOW_TRACKING_URI=file:./MLProject/mlruns
+        mkdir -p MLProject/mlruns
+        python -c "import mlflow; mlflow.set_tracking_uri('file:MLProject/mlruns'); mlflow.create_experiment('Default') if not mlflow.get_experiment_by_name('Default') else None"
+
+    - name: Run MLflow project
+      shell: bash -l {0}
+      run: |
+        export MLFLOW_TRACKING_URI=file:./MLProject/mlruns
+        export MLFLOW_EXPERIMENT_NAME=Default
+        mlflow run MLProject --env-manager=local
+
+    - name: Get latest run ID
+      id: get_run_id
+      shell: bash -l {0}
+      run: |
+        export MLFLOW_TRACKING_URI=file:./MLProject/mlruns
+        experiment_id=$(python -c "import mlflow; mlflow.set_tracking_uri('file:MLProject/mlruns'); print(mlflow.get_experiment_by_name('Default').experiment_id)")
+        echo "experiment_id=$experiment_id" >> $GITHUB_ENV
+
+        run_id=$(ls -1t "MLProject/mlruns/$experiment_id" | grep -E '^[a-f0-9]{32}$' | head -n 1)
+        echo "MLFLOW_RUN_ID=$run_id" >> $GITHUB_ENV
+
+    - name: Upload MLflow artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: mlartifacts
+        path: MLProject/mlruns/${{ env.experiment_id }}/${{ env.MLFLOW_RUN_ID }}/artifacts
+
+    - name: Log in to Docker Hub
+      shell: bash -l {0}
+      run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+    - name: Build Docker Image
+      shell: bash -l {0}
+      run: |
+        mlflow models build-docker -m "file:MLProject/mlruns/${{ env.experiment_id }}/${{ env.MLFLOW_RUN_ID }}/artifacts/model" -n "${{ secrets.DOCKER_USERNAME }}/ci-mlflow-model"
+
+    - name: Push Docker Image
+      shell: bash -l {0}
+      run: docker push ${{ secrets.DOCKER_USERNAME }}/ci-mlflow-model
+
+    - name: Log out from Docker Hub
+      shell: bash -l {0}
+      run: docker logout
